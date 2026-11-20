@@ -43,6 +43,21 @@ class TransformRequest(BaseModel):
     source_data: list[dict[str, Any]]
 
 
+class TrackedTransformRequest(BaseModel):
+    rule_id: int
+    source_row_id: str
+    source_data: dict[str, Any]
+
+
+class RevalidateRequest(BaseModel):
+    voucher_id: int
+
+
+class SourceCorrectionRequest(BaseModel):
+    source_row_id: str
+    corrected_data: dict[str, Any]
+
+
 class ValidationRequest(BaseModel):
     records: list[dict[str, Any]]
     source_module: str = ""
@@ -145,6 +160,52 @@ def pipeline_validate_batch(request: ValidationRequest) -> dict[str, Any]:
     svc = DataQualityRuleService()
     result = svc.validate_batch(records=request.records, source_module=request.source_module)
     return result
+
+
+@router.post("/transform-tracked")
+def pipeline_transform_tracked(request: TrackedTransformRequest) -> dict[str, Any]:
+    """链路6延伸: 可复验转换 → 生成关联字段解析明细的转换凭证。
+
+    完整覆盖：data_transform（转换+凭证） → source_row_registry（输入版本）。
+    """
+    from app.services.data_transform import DataTransformService
+    svc = DataTransformService()
+    return svc.apply_transform_tracked(
+        rule_id=request.rule_id,
+        source_data=request.source_data,
+        source_row_id=request.source_row_id,
+    )
+
+
+@router.post("/transform-revalidate")
+def pipeline_transform_revalidate(request: RevalidateRequest) -> dict[str, Any]:
+    """链路6延伸: 按转换凭证复验 → 依据凭证快照的原输入与规则版本。
+
+    完整覆盖：data_quality_rule（复验） → transform_voucher（结论写回）。
+    同一凭证重复复验只记一份结果。
+    """
+    from app.services.data_quality_rule import DataQualityRuleService
+    svc = DataQualityRuleService()
+    return svc.revalidate_voucher(request.voucher_id)
+
+
+@router.get("/transform-voucher/{voucher_id}")
+def pipeline_get_transform_voucher(voucher_id: int) -> dict[str, Any]:
+    """查询转换凭证：字段解析明细、输入版本、规则快照与复验结论。"""
+    from app.services.data_transform import DataTransformService
+    svc = DataTransformService()
+    voucher = svc.get_voucher(voucher_id)
+    if voucher is None:
+        raise HTTPException(status_code=404, detail=f"转换凭证 {voucher_id} 不存在")
+    return voucher
+
+
+@router.post("/source-row-correction")
+def pipeline_source_row_correction(request: SourceCorrectionRequest) -> dict[str, Any]:
+    """登记来源行更正：输入版本递增，不回写已生成凭证的原输入。"""
+    from app.services.data_transform import DataTransformService
+    svc = DataTransformService()
+    return svc.register_source_correction(request.source_row_id, request.corrected_data)
 
 
 @router.get("/health-summary")
